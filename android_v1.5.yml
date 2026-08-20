@@ -1,0 +1,41 @@
+name: Build GigLyrics APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get project
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Unpack GigLyrics
+        run: |
+          rm -rf buildsrc
+          mkdir buildsrc
+          unzip -q GigLyrics_v1.5.zip -d buildsrc
+
+      - name: Build APK
+        working-directory: buildsrc/GigLyrics
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GigLyrics-APK-v1.5
+          path: buildsrc/GigLyrics/app/build/outputs/apk/debug/app-debug.apk
