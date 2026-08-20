@@ -65,6 +65,37 @@ jobs:
         with:
           name: GigLyrics-APK
           path: buildsrc/GigLyrics/app/build/outputs/apk/debug/app-debug.apk
+          kotlin {
+              jvmToolchain(17)
+          }
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("buildsrc/GigLyrics/app/build.gradle.kts")
+          s = p.read_text()
+          marker = "    buildFeatures {\n        compose = true\n    }\n"
+          patch = marker + '''
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          '''
+          if "compileOptions {" not in s:
+              s = s.replace(marker, patch)
+          p.write_text(s)
+          PY
+
+      - name: Build APK
+        working-directory: buildsrc/GigLyrics
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GigLyrics-APK
+          path: buildsrc/GigLyrics/app/build/outputs/apk/debug/app-debug.apk
         uses: actions/upload-artifact@v4
         with:
           name: GigLyrics-APK
