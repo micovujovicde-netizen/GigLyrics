@@ -1,4 +1,4 @@
-name: Build GigLyrics APK v1.16 BETA
+name: Build GigLyrics APK v1.18 BETA
 
 on:
   workflow_dispatch:
@@ -58,6 +58,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: GigLyrics-APK-v1.16-BETA
+          name: GigLyrics-APK-v1.18-BETA
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
