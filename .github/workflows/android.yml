@@ -26,19 +26,29 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Unpack PauseMix project
+      - name: Find Android project
+        id: project
         run: |
-          rm -rf PauseMix_V1
-          unzip -q PauseMix_V1.zip -d .
-          ls -la PauseMix_V1
+          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            echo "Android project found in repository root"
+          elif [ -f "PauseMix_V1/settings.gradle" ] || [ -f "PauseMix_V1/settings.gradle.kts" ]; then
+            echo "dir=PauseMix_V1" >> "$GITHUB_OUTPUT"
+            echo "Android project found in PauseMix_V1"
+          else
+            echo "ERROR: Android project not found"
+            echo "Repository contents:"
+            find . -maxdepth 3 -type f | sort | head -n 200
+            exit 1
+          fi
 
       - name: Build debug APK
         id: build_apk
-        working-directory: PauseMix_V1
+        working-directory: ${{ steps.project.outputs.dir }}
         continue-on-error: true
         run: |
           set -o pipefail
-          gradle assembleDebug --stacktrace 2>&1 | tee ../build.log
+          gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           exit ${PIPESTATUS[0]}
 
       - name: Show short Kotlin errors
@@ -46,24 +56,33 @@ jobs:
         run: |
           echo "===== FIRST BUILD ERRORS ====="
           grep -n -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error)" build.log | head -n 40 || true
-          echo "===== CONTEXT AROUND FIRST KOTLIN ERROR ====="
+
+          echo "===== CONTEXT AROUND FIRST ERROR ====="
+
           first=$(grep -n -m1 -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error)" build.log | cut -d: -f1)
+
           if [ -n "$first" ]; then
             start=$(( first > 8 ? first - 8 : 1 ))
             end=$(( first + 20 ))
             sed -n "${start},${end}p" build.log
           else
-            tail -n 80 build.log
+            tail -n 100 build.log
           fi
 
       - name: Fail job if build failed
         if: steps.build_apk.outcome == 'failure'
         run: exit 1
 
+      - name: Find APK
+        if: steps.build_apk.outcome == 'success'
+        run: |
+          find . -type f -name "*.apk" -print
+
       - name: Upload APK
         if: steps.build_apk.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: PauseMix-debug-apk
-          path: PauseMix_V1/app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            **/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
