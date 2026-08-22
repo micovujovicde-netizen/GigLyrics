@@ -26,21 +26,30 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Unpack PauseMix project
+        run: |
+          rm -rf PauseMix_V1
+          unzip -q PauseMix_V1_fixed.zip -d .
+          echo "===== ROOT ====="
+          ls -la
+          echo "===== PROJECT ====="
+          find . -maxdepth 2 -type f | sort | head -n 100
+
       - name: Find Android project
         id: project
         run: |
-          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-            echo "Android project found in repository root"
-          elif [ -f "PauseMix_V1/settings.gradle" ] || [ -f "PauseMix_V1/settings.gradle.kts" ]; then
-            echo "dir=PauseMix_V1" >> "$GITHUB_OUTPUT"
-            echo "Android project found in PauseMix_V1"
-          else
-            echo "ERROR: Android project not found"
-            echo "Repository contents:"
-            find . -maxdepth 3 -type f | sort | head -n 200
+          PROJECT_DIR=$(find . -maxdepth 3 \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -printf '%h\n' | head -n 1)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project not found after unzip"
+            find . -maxdepth 4 -type f | sort | head -n 200
             exit 1
           fi
+
+          echo "Found Android project at: $PROJECT_DIR"
+          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Build debug APK
         id: build_apk
@@ -51,23 +60,16 @@ jobs:
           gradle assembleDebug --stacktrace 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           exit ${PIPESTATUS[0]}
 
-      - name: Show short Kotlin errors
+      - name: Show short build errors
         if: steps.build_apk.outcome == 'failure'
         run: |
           echo "===== FIRST BUILD ERRORS ====="
-          grep -n -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error)" build.log | head -n 40 || true
 
-          echo "===== CONTEXT AROUND FIRST ERROR ====="
+          grep -n -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error|FAILURE:|What went wrong)" \
+          build.log | head -n 50 || true
 
-          first=$(grep -n -m1 -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error)" build.log | cut -d: -f1)
-
-          if [ -n "$first" ]; then
-            start=$(( first > 8 ? first - 8 : 1 ))
-            end=$(( first + 20 ))
-            sed -n "${start},${end}p" build.log
-          else
-            tail -n 100 build.log
-          fi
+          echo "===== END OF BUILD LOG ====="
+          tail -n 120 build.log
 
       - name: Fail job if build failed
         if: steps.build_apk.outcome == 'failure'
