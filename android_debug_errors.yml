@@ -1,0 +1,69 @@
+name: Build PauseMix APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Unpack PauseMix project
+        run: |
+          rm -rf PauseMix_V1
+          unzip -q PauseMix_V1.zip -d .
+          ls -la PauseMix_V1
+
+      - name: Build debug APK
+        id: build_apk
+        working-directory: PauseMix_V1
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace 2>&1 | tee ../build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Show short Kotlin errors
+        if: steps.build_apk.outcome == 'failure'
+        run: |
+          echo "===== FIRST BUILD ERRORS ====="
+          grep -n -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error)" build.log | head -n 40 || true
+          echo "===== CONTEXT AROUND FIRST KOTLIN ERROR ====="
+          first=$(grep -n -m1 -E "(^e: | error: |Unresolved reference|Type mismatch|No value passed|Too many arguments|Cannot access|Compilation error)" build.log | cut -d: -f1)
+          if [ -n "$first" ]; then
+            start=$(( first > 8 ? first - 8 : 1 ))
+            end=$(( first + 20 ))
+            sed -n "${start},${end}p" build.log
+          else
+            tail -n 80 build.log
+          fi
+
+      - name: Fail job if build failed
+        if: steps.build_apk.outcome == 'failure'
+        run: exit 1
+
+      - name: Upload APK
+        if: steps.build_apk.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PauseMix-debug-apk
+          path: PauseMix_V1/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
