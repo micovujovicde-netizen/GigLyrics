@@ -1,0 +1,13 @@
+=== GPT ACCESS TEST ===
+
+Repo: GigLyrics
+Owner: micovujovicde-netizen
+
+Ako GPT može da pročita ovaj fajl:
+VRATA SU OTVORENA. 😎
+
+Ako ne može:
+GitHub, pojeo si govno. 💩
+
+Test token:
+TERAFON-GPT-KRETEN-2026
