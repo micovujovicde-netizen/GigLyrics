@@ -1,4 +1,4 @@
-name: Build GigMonster_TV APK + AAB
+name: Build GigMonster_TV APK + signed AAB
 
 on:
   workflow_dispatch:
@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      GIGMONSTER_KEYSTORE_BASE64: ${{ secrets.GIGMONSTER_KEYSTORE_BASE64 }}
       GIGMONSTER_KEYSTORE_PASSWORD: ${{ secrets.GIGMONSTER_KEYSTORE_PASSWORD }}
       GIGMONSTER_KEY_ALIAS: ${{ secrets.GIGMONSTER_KEY_ALIAS }}
       GIGMONSTER_KEY_PASSWORD: ${{ secrets.GIGMONSTER_KEY_PASSWORD }}
@@ -36,7 +37,7 @@ jobs:
       - name: Unpack GigMonster_TV
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           rm -rf buildsrc
           mkdir buildsrc
           unzip -q GigMonster_TV.zip -d buildsrc
@@ -50,19 +51,66 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Restore GigMonster signing key
+      - name: Validate signing secrets
         shell: bash
         run: |
-          set -e
-          echo "${{ secrets.GIGMONSTER_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/GigMonster-upload.jks"
-          echo "GIGMONSTER_KEYSTORE_PATH=$RUNNER_TEMP/GigMonster-upload.jks" >> "$GITHUB_ENV"# refresh
+          set -euo pipefail
+          test -n "$GIGMONSTER_KEYSTORE_BASE64" || { echo "Missing GIGMONSTER_KEYSTORE_BASE64"; exit 1; }
+          test -n "$GIGMONSTER_KEYSTORE_PASSWORD" || { echo "Missing GIGMONSTER_KEYSTORE_PASSWORD"; exit 1; }
+          test -n "$GIGMONSTER_KEY_ALIAS" || { echo "Missing GIGMONSTER_KEY_ALIAS"; exit 1; }
+          test -n "$GIGMONSTER_KEY_PASSWORD" || { echo "Missing GIGMONSTER_KEY_PASSWORD"; exit 1; }
 
-      - name: Build APK and signed AAB
+      - name: Restore and verify GigMonster signing key
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          KEYSTORE="$RUNNER_TEMP/GigMonster-upload.jks"
+          printf '%s' "$GIGMONSTER_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
+
+          keytool -list \
+            -keystore "$KEYSTORE" \
+            -storepass "$GIGMONSTER_KEYSTORE_PASSWORD" \
+            -alias "$GIGMONSTER_KEY_ALIAS" >/dev/null
+
+          echo "GIGMONSTER_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+
+      - name: Build APK and AAB
+        shell: bash
+        run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
           gradle --no-daemon assembleDebug bundleRelease
+
+      - name: Force-sign and verify AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AAB="$PROJECT_DIR/app/build/outputs/bundle/release/app-release.aab"
+
+          if [ ! -f "$AAB" ]; then
+            echo "AAB not found: $AAB"
+            exit 1
+          fi
+
+          if unzip -l "$AAB" | grep -Eq 'META-INF/[^/]+\.(RSA|DSA|EC)$'; then
+            echo "AAB already contains a signing certificate."
+          else
+            echo "AAB is unsigned. Signing it now..."
+            jarsigner \
+              -sigalg SHA256withRSA \
+              -digestalg SHA-256 \
+              -keystore "$GIGMONSTER_KEYSTORE_PATH" \
+              -storepass "$GIGMONSTER_KEYSTORE_PASSWORD" \
+              -keypass "$GIGMONSTER_KEY_PASSWORD" \
+              "$AAB" \
+              "$GIGMONSTER_KEY_ALIAS"
+          fi
+
+          VERIFY_OUTPUT="$(jarsigner -verify -verbose -certs "$AAB" 2>&1)"
+          echo "$VERIFY_OUTPUT"
+          echo "$VERIFY_OUTPUT" | grep -q "jar verified."
+          echo "SIGNED AAB VERIFIED OK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
