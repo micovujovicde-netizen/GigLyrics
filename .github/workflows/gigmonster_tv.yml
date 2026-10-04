@@ -1,0 +1,79 @@
+name: Build GigMonster_TV APK + AAB
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "GigMonster_TV.zip"
+      - ".github/workflows/gigmonster_tv.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      GIGMONSTER_KEYSTORE_PASSWORD: ${{ secrets.GIGMONSTER_KEYSTORE_PASSWORD }}
+      GIGMONSTER_KEY_ALIAS: ${{ secrets.GIGMONSTER_KEY_ALIAS }}
+      GIGMONSTER_KEY_PASSWORD: ${{ secrets.GIGMONSTER_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Unpack GigMonster_TV
+        shell: bash
+        run: |
+          set -e
+          rm -rf buildsrc
+          mkdir buildsrc
+          unzip -q GigMonster_TV.zip -d buildsrc
+
+          PROJECT_DIR="$(find buildsrc -type f -name 'settings.gradle.kts' -printf '%h\n' | head -n 1)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "settings.gradle.kts not found."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Restore GigMonster signing key
+        shell: bash
+        run: |
+          set -e
+          echo "${{ secrets.GIGMONSTER_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/GigMonster-upload.jks"
+          echo "GIGMONSTER_KEYSTORE_PATH=$RUNNER_TEMP/GigMonster-upload.jks" >> "$GITHUB_ENV"
+
+      - name: Build APK and signed AAB
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR"
+          gradle --no-daemon assembleDebug bundleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GigMonster_TV-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload signed AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: GigMonster_TV-AAB
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
