@@ -55,7 +55,7 @@ jobs:
         run: |
           set -e
           echo "${{ secrets.GIGMONSTER_KEYSTORE_BASE64 }}" | base64 --decode > "$RUNNER_TEMP/GigMonster-upload.jks"
-          echo "GIGMONSTER_KEYSTORE_PATH=$RUNNER_TEMP/GigMonster-upload.jks" >> "$GITHUB_ENV"
+          echo "GIGMONSTER_KEYSTORE_PATH=$RUNNER_TEMP/GigMonster-upload.jks" >> "$GITHUB_ENV"# refresh
 
       - name: Build APK and signed AAB
         shell: bash
