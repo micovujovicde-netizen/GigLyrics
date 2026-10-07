@@ -1,0 +1,66 @@
+name: Build YTMonster APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "YTMonster.zip"
+      - ".github/workflows/ytmonster.yml"
+      - "**/*.kt"
+      - "**/*.kts"
+      - "**/AndroidManifest.xml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Extract YTMonster.zip when present
+        shell: bash
+        run: |
+          if [ -f YTMonster.zip ]; then
+            rm -rf build-src
+            mkdir build-src
+            unzip -q YTMonster.zip -d build-src
+            if [ -d build-src/YTMonster ]; then
+              echo "PROJECT_DIR=build-src/YTMonster" >> "$GITHUB_ENV"
+            else
+              echo "PROJECT_DIR=build-src" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          fi
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug --stacktrace
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p apk-out
+          cp "$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk" apk-out/YTMonster.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTMonster-APK
+          path: apk-out/YTMonster.apk
+          if-no-files-found: error
