@@ -2,6 +2,12 @@ name: BrakeMonster PRO - Signed Update APK
 
 on:
   workflow_dispatch:
+    inputs:
+      license_test_mode:
+        description: 'Build TEST APK (test licensing and checkout)'
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [main]
     paths:
@@ -67,9 +73,12 @@ jobs:
 
       - name: Build PRO release APK
         shell: bash
+        env:
+          BM_LICENSE_TEST_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.license_test_mode && 'true' || 'false' }}
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+          echo "BM_LICENSE_TEST_MODE=$BM_LICENSE_TEST_MODE"
           ./gradlew --no-daemon --stacktrace assembleRelease
           test -f app/build/outputs/apk/release/app-release-unsigned.apk
 
