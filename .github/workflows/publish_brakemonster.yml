@@ -1,0 +1,355 @@
+name: Publish verified BrakeMonster PRO release
+
+on:
+  workflow_run:
+    workflows: ['BrakeMonster PRO - Signed Update APK']
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish_brakemonster.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: brakemonster-production-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Select successful trusted production build
+        id: build
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const eventRun = context.payload.workflow_run;
+            const latest = eventRun || (await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'brakemonster_pro.yml', branch: 'main', status: 'success', per_page: 1
+            })).data.workflow_runs[0];
+            if (!latest || latest.conclusion !== 'success' || latest.head_branch !== 'main' ||
+                latest.head_repository.full_name !== `${context.repo.owner}/${context.repo.repo}` ||
+                !['push', 'workflow_dispatch'].includes(latest.event)) {
+              throw new Error('No successful trusted main-branch build available');
+            }
+            core.setOutput('run_id', String(latest.id));
+            core.setOutput('url', latest.html_url);
+      - name: Download signed APK from successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: BrakeMonster-PRO-UPDATE-APK
+          path: apk-out
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify APK and publish production release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_URL: ${{ steps.build.outputs.url }}
+        run: |
+          python3 - publish --apk apk-out/BrakeMonster-PRO-UPDATE.apk --build-run "$BUILD_URL" <<'PYRELEASE'
+          #!/usr/bin/env python3
+          """Publish verified production APKs and sync the website; standard library only."""
+          import argparse
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import struct
+          import subprocess
+          import tempfile
+          import urllib.error
+          import urllib.request
+          import zipfile
+          
+          APP_REPO = 'micovujovicde-netizen/GigLyrics'
+          SITE_REPO = 'micovujovicde-netizen/teraphonia-site'
+          PACKAGE = 'com.teraphonia.breakmonster.pro'
+          CERTIFICATE = '93236b7d82cec6990e0f9b47e29ec1dd31b4a6e2b7884e73813165c3fb75ca4a'
+          APK_NAME = 'BrakeMonster-PRO-UPDATE.apk'
+          MANIFEST_NAME = 'latest.json'
+          MAX_APK = 512 * 1024 * 1024
+          
+          
+          def api(repo, suffix):
+              url = 'https://api.github.com/repos/' + repo + suffix
+              headers = {'Accept': 'application/vnd.github+json', 'User-Agent': 'BrakeMonster-release-sync'}
+              token = os.environ.get('GH_TOKEN')
+              if token:
+                  headers['Authorization'] = 'Bearer ' + token
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=45) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if error.code == 404:
+                      return None
+                  raise
+          
+          
+          def download(url, destination, limit=MAX_APK):
+              # Public release URLs only. No authorization is forwarded across redirects.
+              if not re.fullmatch(r'https://github\.com/micovujovicde-netizen/(?:GigLyrics|teraphonia-site)/releases/download/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+', url):
+                  raise ValueError('Untrusted public release URL')
+              request = urllib.request.Request(url, headers={'User-Agent': 'BrakeMonster-release-sync'})
+              total = 0
+              with urllib.request.urlopen(request, timeout=90) as response, Path(destination).open('wb') as output:
+                  while True:
+                      chunk = response.read(1024 * 1024)
+                      if not chunk:
+                          break
+                      total += len(chunk)
+                      if total > limit:
+                          raise ValueError('Release asset exceeds size limit')
+                      output.write(chunk)
+          
+          
+          def manifest_attributes(binary):
+              strings, attributes, offset = [], {}, 8
+              while offset + 8 <= len(binary):
+                  kind, header, size = struct.unpack_from('<HHI', binary, offset)
+                  if size < 8 or offset + size > len(binary):
+                      raise ValueError('Invalid binary Android manifest')
+                  if kind == 1:
+                      count, _, flags, start, _ = struct.unpack_from('<IIIII', binary, offset + 8)
+                      indexes = struct.unpack_from('<' + 'I' * count, binary, offset + header)
+                      def length8(pos):
+                          value = binary[pos]
+                          return (((value & 127) << 8) | binary[pos+1], pos+2) if value & 128 else (value, pos+1)
+                      def length16(pos):
+                          value = struct.unpack_from('<H', binary, pos)[0]
+                          return (((value & 32767) << 16) | struct.unpack_from('<H', binary, pos+2)[0], pos+4) if value & 32768 else (value, pos+2)
+                      for index in indexes:
+                          pos = offset + start + index
+                          if flags & 256:
+                              _, pos = length8(pos)
+                              length, pos = length8(pos)
+                              value = binary[pos:pos+length].decode('utf-8')
+                          else:
+                              length, pos = length16(pos)
+                              value = binary[pos:pos+length*2].decode('utf-16le')
+                          strings.append(value)
+                  elif kind == 0x102:
+                      _, name, attr_start, attr_size, attr_count = struct.unpack_from('<IIHHH', binary, offset + 16)
+                      element = strings[name]
+                      if element in ('manifest', 'uses-sdk'):
+                          for index in range(attr_count):
+                              pos = offset + 16 + attr_start + index * attr_size
+                              _, name, _ = struct.unpack_from('<III', binary, pos)
+                              _, _, value_type, data = struct.unpack_from('<HBBI', binary, pos+12)
+                              key = strings[name]
+                              if key in ('package', 'versionCode', 'versionName', 'minSdkVersion'):
+                                  attributes[key] = strings[data] if value_type == 3 else data
+                  offset += size
+              return attributes
+          
+          
+          def inspect_apk(apk):
+              apk = Path(apk)
+              if not 1_000_000 <= apk.stat().st_size <= MAX_APK:
+                  raise ValueError('Invalid APK size')
+              with zipfile.ZipFile(apk) as archive:
+                  if archive.testzip() is not None:
+                      raise ValueError('APK ZIP integrity failure')
+                  attributes = manifest_attributes(archive.read('AndroidManifest.xml'))
+              if attributes.get('package') != PACKAGE:
+                  raise ValueError('Wrong application ID')
+              if not isinstance(attributes.get('versionCode'), int) or attributes['versionCode'] <= 0:
+                  raise ValueError('Invalid versionCode')
+              name = attributes.get('versionName', '')
+              if name.endswith('-TEST'):
+                  return None  # TEST artifacts are never public production releases.
+              if not re.fullmatch(r'\d+\.\d+\.\d+-pro\.\d+', name):
+                  raise ValueError('Unexpected production versionName')
+              sdk = attributes.get('minSdkVersion')
+              if not isinstance(sdk, int) or sdk < 26:
+                  raise ValueError('Invalid minimum SDK')
+              home = Path(os.environ.get('ANDROID_HOME', os.environ.get('ANDROID_SDK_ROOT', '/usr/local/lib/android/sdk')))
+              tools = list((home / 'build-tools').glob('*/apksigner'))
+              if not tools:
+                  raise RuntimeError('Android apksigner is required; no unsigned release will be published')
+              signer = max(tools, key=lambda path: tuple(int(x) for x in re.findall(r'\d+', path.parent.name)))
+              result = subprocess.run([str(signer), 'verify', '--verbose', '--print-certs', str(apk)],
+                                      text=True, capture_output=True, check=True)
+              certificates = re.findall(r'certificate SHA-256 digest:\s*([0-9a-fA-F]{64})', result.stdout)
+              if set(value.lower() for value in certificates) != {CERTIFICATE}:
+                  raise ValueError('Production signing certificate mismatch')
+              return {'applicationId': PACKAGE, 'versionCode': attributes['versionCode'],
+                      'versionName': name, 'minSdk': sdk, 'sizeBytes': apk.stat().st_size,
+                      'sha256': hashlib.sha256(apk.read_bytes()).hexdigest(),
+                      'signingCertificateSha256': CERTIFICATE}
+          
+          
+          def metadata(facts, repo, build_run, previous=None):
+              result = dict(previous or {})
+              result.update(facts)
+              result.update(schemaVersion=1, available=True, buildVerified=True,
+                            apkUrl=f'https://github.com/{repo}/releases/download/bm-pro-v{facts["versionCode"]}/{APK_NAME}',
+                            buildRun=build_run, notes='Official BrakeMonster PRO update.')
+              # Billing configuration belongs to the website, not the build/publish workflow.
+              return result
+          
+          
+          def verify_metadata(expected, facts):
+              for key in ('applicationId', 'versionCode', 'versionName', 'minSdk', 'sizeBytes', 'sha256', 'signingCertificateSha256'):
+                  if expected.get(key) != facts.get(key):
+                      raise ValueError('APK/manifest mismatch: ' + key)
+              if expected.get('available') is not True or expected.get('buildVerified') is not True:
+                  raise ValueError('Release is not marked verified and available')
+          
+          
+          def newest(repo):
+              candidates = []
+              for page in range(1, 6):
+                  releases = api(repo, f'/releases?per_page=100&page={page}') or []
+                  for release in releases:
+                      match = re.fullmatch(r'bm-pro-v(\d+)', release.get('tag_name', ''))
+                      if match and not release['draft'] and not release['prerelease']:
+                          if any(asset['name'] == MANIFEST_NAME for asset in release['assets']):
+                              candidates.append((int(match[1]), release))
+                  if len(releases) < 100:
+                      break
+              return max(candidates, key=lambda value: value[0])[1] if candidates else None
+          
+          
+          def gh(*args):
+              return subprocess.run(['gh', *args], text=True, capture_output=True, check=True).stdout
+          
+          
+          def publish(repo, data, apk, directory):
+              tag = 'bm-pro-v' + str(data['versionCode'])
+              existing = api(repo, '/releases/tags/' + tag)
+              path = directory / MANIFEST_NAME
+              path.write_text(json.dumps(data, indent=2) + '\n')
+              if existing and not existing['draft']:
+                  asset = next((value for value in existing['assets'] if value['name'] == APK_NAME), None)
+                  if not asset or asset.get('digest') != 'sha256:' + data['sha256'] or asset['size'] != data['sizeBytes']:
+                      raise ValueError('Published version is immutable; increment versionCode instead of replacing its APK')
+                  manifest_asset = next((value for value in existing['assets'] if value['name'] == MANIFEST_NAME), None)
+                  if not manifest_asset:
+                      gh('release', 'upload', tag, str(path), '--repo', repo)
+                  return
+              if not existing:
+                  gh('release', 'create', tag, '--repo', repo, '--draft', '--title', f'BrakeMonster PRO v{data["versionCode"]}',
+                     '--notes', data['notes'], '--target', 'main')
+              gh('release', 'upload', tag, str(apk), str(path), '--repo', repo, '--clobber')
+              # Publish only after both APK and metadata are attached to the draft.
+              gh('release', 'edit', tag, '--repo', repo, '--draft=false', '--latest')
+              published = api(repo, '/releases/tags/' + tag)
+              asset = next(value for value in published['assets'] if value['name'] == APK_NAME)
+              if asset.get('digest') != 'sha256:' + data['sha256'] or asset['size'] != data['sizeBytes']:
+                  raise ValueError('Published release asset verification failed')
+          
+          
+          def output(**values):
+              destination = os.environ.get('GITHUB_OUTPUT')
+              if destination:
+                  with open(destination, 'a') as stream:
+                      for key, value in values.items():
+                          stream.write(f'{key}={str(value).lower() if isinstance(value, bool) else value}\n')
+              print(json.dumps(values))
+          
+          
+          def run_publish(args):
+              apk = Path(args.apk)
+              facts = inspect_apk(apk)
+              if facts is None:
+                  output(published=False, skipped='test-build')
+                  return
+              latest = newest(APP_REPO)
+              if latest and int(latest['tag_name'].removeprefix('bm-pro-v')) > facts['versionCode']:
+                  output(published=False, skipped='older-build')
+                  return
+              data = metadata(facts, APP_REPO, args.build_run)
+              with tempfile.TemporaryDirectory() as directory:
+                  publish(APP_REPO, data, apk, Path(directory))
+              output(published=True, version=data['versionCode'])
+          
+          
+          def read_website_manifest():
+              path = Path('releases/latest.json')
+              if path.exists():
+                  return json.loads(path.read_text())
+              with zipfile.ZipFile('TERAPHONIA_Website.zip') as archive:
+                  return json.loads(archive.read('releases/latest.json'))
+          
+          
+          def website_matches(current):
+              try:
+                  request = urllib.request.Request('https://teraphonia.com/releases/latest.json',
+                      headers={'Cache-Control': 'no-cache', 'User-Agent': 'BrakeMonster-release-sync'})
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      live = json.load(response)
+                  return all(live.get(key) == current.get(key) for key in (
+                      'applicationId', 'versionCode', 'versionName', 'sizeBytes', 'sha256', 'apkUrl',
+                      'signingCertificateSha256', 'available', 'buildVerified'))
+              except (OSError, ValueError):
+                  return False
+          
+          
+          def run_sync(args):
+              current = read_website_manifest()
+              upstream = newest(APP_REPO)
+              with tempfile.TemporaryDirectory() as folder:
+                  directory = Path(folder)
+                  if upstream:
+                      asset = next(value for value in upstream['assets'] if value['name'] == MANIFEST_NAME)
+                      path = directory / 'upstream.json'
+                      download(asset['browser_download_url'], path, 65536)
+                      candidate = json.loads(path.read_text())
+                      if candidate['versionCode'] < current['versionCode']:
+                          output(changed=False, deploy=not website_matches(current), skipped='older-release')
+                          return
+                  else:
+                      candidate = current  # Bootstrap from the already uploaded, verified production APK.
+                  # Fast no-change path still checks the public destination APK metadata.
+                  tag = 'bm-pro-v' + str(candidate['versionCode'])
+                  destination = api(SITE_REPO, '/releases/tags/' + tag)
+                  if upstream and destination and not destination['draft'] and not destination['prerelease']:
+                      asset = next((value for value in destination['assets'] if value['name'] == APK_NAME), None)
+                      if asset and asset.get('digest') == 'sha256:' + current.get('sha256', '') and asset['size'] == current.get('sizeBytes'):
+                          if all(current.get(key) == candidate.get(key) for key in ('versionCode', 'versionName', 'sha256', 'sizeBytes')) and current.get('apkUrl') == asset['browser_download_url']:
+                              output(changed=False, deploy=not website_matches(current), version=current['versionCode'])
+                              return
+                  apk = directory / APK_NAME
+                  download(candidate['apkUrl'], apk)
+                  facts = inspect_apk(apk)
+                  if facts is None:
+                      raise ValueError('TEST APK cannot become a website release')
+                  verify_metadata(candidate, facts)
+                  data = metadata(facts, SITE_REPO, candidate['buildRun'], current)
+                  publish(SITE_REPO, data, apk, directory)
+                  path = Path('releases/latest.json')
+                  path.parent.mkdir(exist_ok=True)
+                  changed = not path.exists() or json.loads(path.read_text()) != data
+                  if changed:
+                      temporary = path.with_suffix('.tmp')
+                      temporary.write_text(json.dumps(data, indent=2) + '\n')
+                      temporary.replace(path)
+                  output(changed=changed, deploy=changed or not website_matches(data), version=data['versionCode'])
+          
+          
+          if __name__ == '__main__':
+              parser = argparse.ArgumentParser()
+              commands = parser.add_subparsers(dest='command', required=True)
+              pub = commands.add_parser('publish')
+              pub.add_argument('--apk', required=True)
+              pub.add_argument('--build-run', required=True)
+              commands.add_parser('sync')
+              arguments = parser.parse_args()
+              run_publish(arguments) if arguments.command == 'publish' else run_sync(arguments)
+          PYRELEASE
